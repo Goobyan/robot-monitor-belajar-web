@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 
 function formatDuration(sec) {
   const s = Number(sec || 0);
@@ -28,7 +28,10 @@ export default function DashboardPage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [sendingCmd, setSendingCmd] = useState(false);
+  const [syncingHardware, setSyncingHardware] = useState(false);
   const [toast, setToast] = useState('');
+
+  const optimisticLockRef = useRef({ until: 0, patch: null });
 
   const showToast = (msg) => {
     setToast(msg);
@@ -37,10 +40,31 @@ export default function DashboardPage() {
 
   const fetchDashboard = useCallback(async () => {
     try {
-      const res = await fetch('/api/dashboard', { cache: 'no-store' });
+      const res = await fetch(`/api/dashboard?t=${Date.now()}`, { cache: 'no-store' });
       const json = await res.json();
       if (json.ok) {
-        setData(json);
+        const lock = optimisticLockRef.current;
+        if (lock.patch && Date.now() < lock.until && json.device) {
+          const matchesServer = Object.entries(lock.patch).every(
+            ([k, v]) => json.device[k] === v
+          );
+          if (matchesServer) {
+            optimisticLockRef.current = { until: 0, patch: null };
+            setSyncingHardware(false);
+            setData(json);
+          } else {
+            setData({
+              ...json,
+              device: { ...json.device, ...lock.patch }
+            });
+          }
+        } else {
+          if (lock.until > 0) {
+            optimisticLockRef.current = { until: 0, patch: null };
+            setSyncingHardware(false);
+          }
+          setData(json);
+        }
       }
     } catch (e) {
       console.error(e);
@@ -51,12 +75,52 @@ export default function DashboardPage() {
 
   useEffect(() => {
     fetchDashboard();
-    const timer = setInterval(fetchDashboard, 2500);
+    const timer = setInterval(fetchDashboard, 2000);
     return () => clearInterval(timer);
   }, [fetchDashboard]);
 
+  const applyOptimisticChange = (action, val) => {
+    if (!data?.device) return;
+    const cur = data.device;
+    let patch = {};
+
+    if (action === 'start_pause') {
+      if (cur.session_state === 1) {
+        patch = { session_state: 2, status_msg: 'SESI DIJEDA' };
+      } else {
+        patch = {
+          session_state: 1,
+          status_msg: 'FOKUS BELAJAR',
+          ...(cur.session_state === 3 ? { elapsed_sec: 0, focus_sec: 0, distractions: 0 } : {})
+        };
+      }
+    } else if (action === 'stop') {
+      patch = {
+        session_state: 0,
+        status_msg: 'SIAP BELAJAR',
+        elapsed_sec: 0,
+        focus_sec: 0,
+        distractions: 0
+      };
+    } else if (action === 'toggle_mute') {
+      patch = { muted: !cur.muted };
+    } else if (action === 'set_target') {
+      patch = { target_min: Number(val) };
+    }
+
+    if (Object.keys(patch).length > 0) {
+      optimisticLockRef.current = { until: Date.now() + 8000, patch };
+      setSyncingHardware(true);
+      setData((prev) =>
+        prev ? { ...prev, device: { ...prev.device, ...patch } } : prev
+      );
+    }
+  };
+
   const sendControl = async (action, val = '') => {
     setSendingCmd(true);
+    applyOptimisticChange(action, val);
+
     try {
       const res = await fetch('/api/control', {
         method: 'POST',
@@ -65,10 +129,16 @@ export default function DashboardPage() {
       });
       const json = await res.json();
       if (json.ok) {
-        showToast('Perintah dikirim ke ESP32!');
-        setTimeout(fetchDashboard, 1200);
+        showToast(
+          data?.isOnline
+            ? 'Perintah dikirim ke ESP32!'
+            : 'Perintah antre (ESP32 sedang Offline)'
+        );
+        setTimeout(fetchDashboard, 1500);
       }
     } catch {
+      optimisticLockRef.current = { until: 0, patch: null };
+      setSyncingHardware(false);
       showToast('Gagal mengirim perintah');
     } finally {
       setSendingCmd(false);
@@ -135,7 +205,15 @@ export default function DashboardPage() {
           </p>
         </div>
 
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          {syncingHardware && (
+            <span style={{
+              background: 'rgba(59,130,246,0.18)', border: '1px solid #3b82f6', padding: '6px 10px',
+              borderRadius: 10, fontSize: '0.78rem', color: '#93c5fd', fontWeight: 600
+            }}>
+              Menyinkronkan ESP32...
+            </span>
+          )}
           <span style={{
             background: '#131c31', border: '1px solid #24324d', padding: '6px 12px',
             borderRadius: 10, fontSize: '0.82rem', color: '#cbd5e1'
@@ -155,9 +233,9 @@ export default function DashboardPage() {
         }}>
           <span style={{
             display: 'inline-block', padding: '4px 14px', borderRadius: 99, fontSize: '0.78rem', fontWeight: 700,
-            background: isAlert ? 'rgba(239,68,68,0.2)' : dev.session_state === 1 ? 'rgba(16,185,129,0.2)' : '#24324d',
-            color: isAlert ? '#f87171' : dev.session_state === 1 ? '#34d399' : '#e2e8f0',
-            border: `1px solid ${isAlert ? '#ef4444' : dev.session_state === 1 ? '#10b981' : '#334155'}`
+            background: isAlert ? 'rgba(239,68,68,0.2)' : dev.session_state === 1 ? 'rgba(16,185,129,0.2)' : dev.session_state === 2 ? 'rgba(245,158,11,0.2)' : '#24324d',
+            color: isAlert ? '#f87171' : dev.session_state === 1 ? '#34d399' : dev.session_state === 2 ? '#fbbf24' : '#e2e8f0',
+            border: `1px solid ${isAlert ? '#ef4444' : dev.session_state === 1 ? '#10b981' : dev.session_state === 2 ? '#f59e0b' : '#334155'}`
           }}>
             {dev.status_msg || 'SIAP BELAJAR'}
           </span>

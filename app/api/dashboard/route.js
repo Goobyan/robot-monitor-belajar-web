@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import sql, { ensureTables } from '../../../lib/db';
 
 export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 
 export async function GET() {
   try {
@@ -45,14 +46,23 @@ export async function GET() {
       ORDER BY raw_date ASC
     `;
 
-    return NextResponse.json({
-      ok: true,
-      isOnline,
-      device,
-      summary: summaryRows[0],
-      sessions,
-      dailyChart
-    });
+    return NextResponse.json(
+      {
+        ok: true,
+        isOnline,
+        device,
+        summary: summaryRows[0],
+        sessions,
+        dailyChart
+      },
+      {
+        headers: {
+          'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+          Pragma: 'no-cache',
+          Expires: '0'
+        }
+      }
+    );
   } catch (err) {
     return NextResponse.json({ ok: false, error: err.message }, { status: 500 });
   }
