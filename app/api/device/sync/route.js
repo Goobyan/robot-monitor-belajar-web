@@ -18,56 +18,62 @@ export async function POST(request) {
     const eventName = String(body.event || 'sync');
     const isSleeping = Boolean(body.sleeping);
     const isBootEvent = eventName === 'boot' || eventName === 'reconnect';
+    const awayDist = Number(body.awayDist ?? body.distractions ?? 0);
+    const vibDist = Number(body.vibDist ?? 0);
 
     if (isBootEvent) {
       await sql`
         UPDATE device_state SET
-          session_state = ${Number(body.state ?? 0)},
-          status_msg    = ${String(body.statusMsg ?? 'SIAP BELAJAR')},
-          target_min    = ${Number(body.targetMin ?? 30)},
-          elapsed_sec   = ${Number(body.elapsedSec ?? 0)},
-          focus_sec     = ${Number(body.focusSec ?? 0)},
-          distractions  = ${Number(body.distractions ?? 0)},
-          distance_cm   = ${Number(body.distCm ?? 0)},
-          in_range      = ${Boolean(body.inRange)},
-          ldr_raw       = ${Number(body.ldrRaw ?? 0)},
-          is_dark       = ${Boolean(body.isDark)},
-          vibrating     = ${Boolean(body.vibrating)},
-          muted         = ${Boolean(body.muted)},
-          expression    = ${String(body.expr ?? 'Normal')},
-          wifi_ssid     = ${String(body.ssid ?? '')},
-          local_ip      = ${String(body.staIp ?? '0.0.0.0')},
-          rssi          = ${Number(body.rssi ?? 0)},
-          free_heap     = ${Number(body.freeHeap ?? 0)},
-          is_sleeping   = ${isSleeping},
-          last_event    = ${eventName},
-          last_boot_at  = NOW(),
-          updated_at    = NOW()
+          session_state     = ${Number(body.state ?? 0)},
+          status_msg        = ${String(body.statusMsg ?? 'SIAP BELAJAR')},
+          target_min        = ${Number(body.targetMin ?? 30)},
+          elapsed_sec       = ${Number(body.elapsedSec ?? 0)},
+          focus_sec         = ${Number(body.focusSec ?? 0)},
+          distractions      = ${Number(body.distractions ?? 0)},
+          away_distractions = ${awayDist},
+          vib_distractions  = ${vibDist},
+          distance_cm       = ${Number(body.distCm ?? 0)},
+          in_range          = ${Boolean(body.inRange)},
+          ldr_raw           = ${Number(body.ldrRaw ?? 0)},
+          is_dark           = ${Boolean(body.isDark)},
+          vibrating         = ${Boolean(body.vibrating)},
+          muted             = ${Boolean(body.muted)},
+          expression        = ${String(body.expr ?? 'Normal')},
+          wifi_ssid         = ${String(body.ssid ?? '')},
+          local_ip          = ${String(body.staIp ?? '0.0.0.0')},
+          rssi              = ${Number(body.rssi ?? 0)},
+          free_heap         = ${Number(body.freeHeap ?? 0)},
+          is_sleeping       = ${isSleeping},
+          last_event        = ${eventName},
+          last_boot_at      = NOW(),
+          updated_at        = NOW()
         WHERE id = 1
       `;
     } else {
       await sql`
         UPDATE device_state SET
-          session_state = ${Number(body.state ?? 0)},
-          status_msg    = ${String(body.statusMsg ?? 'SIAP BELAJAR')},
-          target_min    = ${Number(body.targetMin ?? 30)},
-          elapsed_sec   = ${Number(body.elapsedSec ?? 0)},
-          focus_sec     = ${Number(body.focusSec ?? 0)},
-          distractions  = ${Number(body.distractions ?? 0)},
-          distance_cm   = ${Number(body.distCm ?? 0)},
-          in_range      = ${Boolean(body.inRange)},
-          ldr_raw       = ${Number(body.ldrRaw ?? 0)},
-          is_dark       = ${Boolean(body.isDark)},
-          vibrating     = ${Boolean(body.vibrating)},
-          muted         = ${Boolean(body.muted)},
-          expression    = ${String(body.expr ?? 'Normal')},
-          wifi_ssid     = ${String(body.ssid ?? '')},
-          local_ip      = ${String(body.staIp ?? '0.0.0.0')},
-          rssi          = ${Number(body.rssi ?? 0)},
-          free_heap     = ${Number(body.freeHeap ?? 0)},
-          is_sleeping   = ${isSleeping},
-          last_event    = ${eventName},
-          updated_at    = NOW()
+          session_state     = ${Number(body.state ?? 0)},
+          status_msg        = ${String(body.statusMsg ?? 'SIAP BELAJAR')},
+          target_min        = ${Number(body.targetMin ?? 30)},
+          elapsed_sec       = ${Number(body.elapsedSec ?? 0)},
+          focus_sec         = ${Number(body.focusSec ?? 0)},
+          distractions      = ${Number(body.distractions ?? 0)},
+          away_distractions = ${awayDist},
+          vib_distractions  = ${vibDist},
+          distance_cm       = ${Number(body.distCm ?? 0)},
+          in_range          = ${Boolean(body.inRange)},
+          ldr_raw           = ${Number(body.ldrRaw ?? 0)},
+          is_dark           = ${Boolean(body.isDark)},
+          vibrating         = ${Boolean(body.vibrating)},
+          muted             = ${Boolean(body.muted)},
+          expression        = ${String(body.expr ?? 'Normal')},
+          wifi_ssid         = ${String(body.ssid ?? '')},
+          local_ip          = ${String(body.staIp ?? '0.0.0.0')},
+          rssi              = ${Number(body.rssi ?? 0)},
+          free_heap         = ${Number(body.freeHeap ?? 0)},
+          is_sleeping       = ${isSleeping},
+          last_event        = ${eventName},
+          updated_at        = NOW()
         WHERE id = 1
       `;
     }
@@ -78,16 +84,29 @@ export async function POST(request) {
       const elapsed = Number(s.elapsedSec);
       const focus = Number(s.focusSec);
       const focusPct = elapsed > 0 ? Math.min(100, Math.round((focus / elapsed) * 100)) : 100;
+      const sAway = Number(s.awayDist ?? s.distractions ?? 0);
+      const sVib = Number(s.vibDist ?? 0);
+
+      const devRows = await sql`SELECT current_subject FROM device_state WHERE id = 1`;
+      const activeSubject = (devRows[0]?.current_subject || 'Umum').trim() || 'Umum';
 
       await sql`
-        INSERT INTO study_sessions (target_min, elapsed_sec, focus_sec, focus_pct, distractions, completed)
+        INSERT INTO study_sessions (
+          target_min, elapsed_sec, focus_sec, focus_pct,
+          distractions, away_distractions, vib_distractions,
+          completed, subject, note
+        )
         VALUES (
           ${Number(s.targetMin)},
           ${elapsed},
           ${focus},
           ${focusPct},
           ${Number(s.distractions)},
-          ${Boolean(s.completed)}
+          ${sAway},
+          ${sVib},
+          ${Boolean(s.completed)},
+          ${activeSubject},
+          ''
         )
       `;
       sessionSaved = true;
@@ -125,7 +144,6 @@ export async function POST(request) {
       }
     }
 
-    // Pembersihan berkala (5% siklus) agar tidak menambah latency SQL di setiap POST
     if (Math.random() < 0.05) {
       await sql`
         DELETE FROM device_commands

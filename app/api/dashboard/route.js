@@ -44,7 +44,6 @@ function computeStreakDays(dayStrings) {
 
 export async function GET() {
   try {
-    // Cek proteksi PIN jika variabel DASHBOARD_PIN diatur di Vercel
     const requiredPin = (process.env.DASHBOARD_PIN || '').trim();
     if (requiredPin) {
       const cookieStore = cookies();
@@ -69,7 +68,6 @@ export async function GET() {
     const device = stateRows[0] || null;
     const secAgo = device ? Number(device.seconds_ago) : 999999;
 
-    // Penentuan Status 3-Kondisi: 'online' | 'standby' | 'offline'
     let connectionStatus = 'offline';
     if (device) {
       if (device.is_sleeping && secAgo < 86400) {
@@ -96,6 +94,8 @@ export async function GET() {
         COUNT(*)::int AS total_sessions,
         COALESCE(SUM(focus_sec), 0)::int AS total_focus_sec,
         COALESCE(SUM(distractions), 0)::int AS total_distractions,
+        COALESCE(SUM(away_distractions), 0)::int AS total_away_distractions,
+        COALESCE(SUM(vib_distractions), 0)::int AS total_vib_distractions,
         COALESCE(ROUND(AVG(focus_pct)), 100)::int AS avg_focus_pct
       FROM study_sessions
     `;
@@ -115,8 +115,21 @@ export async function GET() {
     `;
     const streakDays = computeStreakDays(streakRows.map((r) => r.study_day));
 
+    const subjectStats = await sql`
+      SELECT
+        COALESCE(NULLIF(TRIM(subject), ''), 'Umum') AS subject,
+        COUNT(*)::int AS session_count,
+        COALESCE(ROUND(SUM(focus_sec) / 60.0), 0)::int AS focus_minutes
+      FROM study_sessions
+      GROUP BY 1
+      ORDER BY focus_minutes DESC
+    `;
+
     const sessions = await sql`
-      SELECT id, target_min, elapsed_sec, focus_sec, focus_pct, distractions, completed, created_at
+      SELECT
+        id, target_min, elapsed_sec, focus_sec, focus_pct,
+        distractions, away_distractions, vib_distractions,
+        completed, subject, note, created_at
       FROM study_sessions
       ORDER BY id DESC
       LIMIT 50
@@ -144,6 +157,7 @@ export async function GET() {
         device,
         config,
         summary: summaryRows[0],
+        subjectStats,
         todayFocusMin: todayRows[0]?.today_focus_min || 0,
         streakDays,
         sessions,

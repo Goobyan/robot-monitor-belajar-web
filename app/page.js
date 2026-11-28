@@ -2,6 +2,17 @@
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 
+const PRESET_SUBJECTS = [
+  'Umum',
+  'Matematika',
+  'Sejarah',
+  'B. Inggris',
+  'B. Indonesia',
+  'PPKn',
+  'Elektronika / IoT',
+  'Web / Coding'
+];
+
 function formatDuration(sec) {
   const s = Number(sec || 0);
   const mins = Math.floor(s / 60).toString().padStart(2, '0');
@@ -44,7 +55,13 @@ function RobotEyeAvatar({ expression }) {
   const isStudy = expr.includes('Fokus');
   const isSuspicious = expr.includes('Curiga') || expr.includes('Ngantuk');
 
-  const eyeColor = isAngry ? '#f87171' : isHappy ? '#34d399' : isStudy ? '#60a5fa' : '#e2e8f0';
+  const eyeColor = isAngry
+    ? '#f87171'
+    : isHappy
+    ? '#34d399'
+    : isStudy
+    ? '#60a5fa'
+    : '#e2e8f0';
 
   return (
     <div style={{
@@ -107,6 +124,13 @@ export default function DashboardPage() {
   const [showCalib, setShowCalib] = useState(false);
   const [toast, setToast] = useState('');
 
+  // State Edit Catatan & Mapel Riwayat
+  const [editingSessionId, setEditingSessionId] = useState(null);
+  const [editNoteText, setEditNoteText] = useState('');
+  const [editSubjectText, setEditSubjectText] = useState('Umum');
+  const [customSubjectInput, setCustomSubjectInput] = useState('');
+
+  // State PIN Lock
   const [pinInput, setPinInput] = useState('');
   const [pinError, setPinError] = useState('');
 
@@ -233,6 +257,46 @@ export default function DashboardPage() {
     }
   };
 
+  const handleSelectSubject = async (subjectName) => {
+    const clean = subjectName.trim() || 'Umum';
+    setData((prev) =>
+      prev ? { ...prev, device: { ...prev.device, current_subject: clean } } : prev
+    );
+    try {
+      await fetch('/api/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'set_subject', val: clean })
+      });
+      showToast(`Mata pelajaran sesi: ${clean}`);
+    } catch {
+      showToast('Gagal menyimpan mata pelajaran');
+    }
+  };
+
+  const handleSaveSessionEdit = async (sessionId) => {
+    try {
+      const res = await fetch('/api/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'update_session',
+          sessionId,
+          subject: editSubjectText,
+          note: editNoteText
+        })
+      });
+      const json = await res.json();
+      if (json.ok) {
+        setEditingSessionId(null);
+        showToast('Catatan sesi diperbarui!');
+        fetchDashboard();
+      }
+    } catch {
+      showToast('Gagal menyimpan catatan');
+    }
+  };
+
   const applyOptimisticChange = (action, val) => {
     if (!data?.device) return;
     const cur = data.device;
@@ -337,17 +401,21 @@ export default function DashboardPage() {
       showToast('Belum ada data riwayat untuk diekspor');
       return;
     }
-    const header = 'ID,Waktu_WIB,Target_Menit,Durasi_Detik,Fokus_Detik,Persentase_Fokus,Distraksi,Status\n';
+    const header = 'ID,Waktu_WIB,Mata_Pelajaran,Target_Menit,Durasi_Detik,Fokus_Detik,Persentase_Fokus,Total_Distraksi,Distraksi_Jarak,Distraksi_Getar,Status,Catatan\n';
     const rows = list.map((s) =>
       [
         s.id,
         `"${formatDateWIB(s.created_at)}"`,
+        `"${(s.subject || 'Umum').replace(/"/g, '""')}"`,
         s.target_min,
         s.elapsed_sec,
         s.focus_sec,
         `${s.focus_pct}%`,
         s.distractions,
-        s.completed ? 'Tercapai' : 'Dihentikan'
+        s.away_distractions ?? s.distractions,
+        s.vib_distractions ?? 0,
+        s.completed ? 'Tercapai' : 'Dihentikan',
+        `"${(s.note || '').replace(/"/g, '""')}"`
       ].join(',')
     );
     const blob = new Blob([header + rows.join('\n')], { type: 'text/csv;charset=utf-8;' });
@@ -415,8 +483,18 @@ export default function DashboardPage() {
   }
 
   const dev = data?.device || {};
+  const isStudying = dev.session_state === 1;
+  const activeSubject = dev.current_subject || 'Umum';
   const connStatus = data?.connectionStatus || 'offline';
-  const summary = data?.summary || { total_sessions: 0, total_focus_sec: 0, total_distractions: 0, avg_focus_pct: 100 };
+  const summary = data?.summary || {
+    total_sessions: 0,
+    total_focus_sec: 0,
+    total_distractions: 0,
+    total_away_distractions: 0,
+    total_vib_distractions: 0,
+    avg_focus_pct: 100
+  };
+  const subjectStats = data?.subjectStats || [];
   const sessions = data?.sessions || [];
   const chart = data?.dailyChart || [];
   const todayFocusMin = Number(data?.todayFocusMin || 0);
@@ -428,17 +506,18 @@ export default function DashboardPage() {
   const progressPct = targetTotalSec > 0 ? Math.min(100, ((dev.elapsed_sec || 0) / targetTotalSec) * 100) : 0;
   const liveFocusPct = (dev.elapsed_sec || 0) > 0 ? Math.round(((dev.focus_sec || 0) / dev.elapsed_sec) * 100) : 100;
   const maxChartMin = Math.max(30, ...chart.map((c) => c.focus_minutes || 0));
+  const maxSubjectMin = Math.max(15, ...subjectStats.map((s) => s.focus_minutes || 0));
 
-  const isAlert = dev.vibrating || (!dev.in_range && dev.session_state === 1);
+  const isAlert = dev.vibrating || (!dev.in_range && isStudying);
 
   const statusMeta = {
     online: { color: '#10b981', label: 'Online (Aktif)' },
-    standby: { color: '#38bdf8', label: 'Standby (Mode Hemat)' },
+    standby: { color: '#38bdf8', label: 'Standby (Jam Meja)' },
     offline: { color: '#ef4444', label: 'Offline' }
   }[connStatus];
 
   return (
-    <main style={{ maxWidth: 1020, margin: '0 auto', padding: '20px 16px 52px' }}>
+    <main style={{ maxWidth: 1040, margin: '0 auto', padding: '20px 16px 52px' }}>
       {toast && (
         <div style={{
           position: 'fixed', bottom: 20, right: 20, background: '#2563eb', color: '#fff',
@@ -449,6 +528,7 @@ export default function DashboardPage() {
         </div>
       )}
 
+      {/* HEADER */}
       <header style={{
         display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center',
         gap: 14, marginBottom: 20, paddingBottom: 16, borderBottom: '1px solid #23314d'
@@ -512,6 +592,7 @@ export default function DashboardPage() {
         <RobotEyeAvatar expression={dev.expression} />
       </header>
 
+      {/* PANEL KALIBRASI SENSOR */}
       {showCalib && (
         <section style={{
           background: '#11192c', border: '1px solid #3b82f6', borderRadius: 16, padding: 18, marginBottom: 18
@@ -565,28 +646,37 @@ export default function DashboardPage() {
         </section>
       )}
 
+      {/* PANEL UTAMA: TIMER, TAG MATA PELAJARAN & TELEMETRI SENSOR */}
       <section style={{
         display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(310px, 1fr))',
         gap: 16, marginBottom: 18
       }}>
         <div style={{
           background: '#11192c',
-          border: `1.5px solid ${isAlert ? '#ef4444' : dev.session_state === 1 ? '#10b981' : '#23314d'}`,
+          border: `1.5px solid ${isAlert ? '#ef4444' : isStudying ? '#10b981' : '#23314d'}`,
           boxShadow: isAlert
             ? '0 0 28px rgba(239,68,68,0.18)'
-            : dev.session_state === 1
+            : isStudying
             ? '0 0 28px rgba(16,185,129,0.14)'
             : 'none',
           borderRadius: 16, padding: 20, textAlign: 'center', transition: 'all 0.35s'
         }}>
-          <span style={{
-            display: 'inline-block', padding: '4px 14px', borderRadius: 99, fontSize: '0.78rem', fontWeight: 700,
-            background: isAlert ? 'rgba(239,68,68,0.2)' : dev.session_state === 1 ? 'rgba(16,185,129,0.2)' : dev.session_state === 2 ? 'rgba(245,158,11,0.2)' : '#23314d',
-            color: isAlert ? '#f87171' : dev.session_state === 1 ? '#34d399' : dev.session_state === 2 ? '#fbbf24' : '#e2e8f0',
-            border: `1px solid ${isAlert ? '#ef4444' : dev.session_state === 1 ? '#10b981' : dev.session_state === 2 ? '#f59e0b' : '#334155'}`
-          }}>
-            {dev.status_msg || 'SIAP BELAJAR'}
-          </span>
+          <div style={{ display: 'flex', justifyContent: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span style={{
+              display: 'inline-block', padding: '4px 14px', borderRadius: 99, fontSize: '0.78rem', fontWeight: 700,
+              background: isAlert ? 'rgba(239,68,68,0.2)' : isStudying ? 'rgba(16,185,129,0.2)' : dev.session_state === 2 ? 'rgba(245,158,11,0.2)' : '#23314d',
+              color: isAlert ? '#f87171' : isStudying ? '#34d399' : dev.session_state === 2 ? '#fbbf24' : '#e2e8f0',
+              border: `1px solid ${isAlert ? '#ef4444' : isStudying ? '#10b981' : dev.session_state === 2 ? '#f59e0b' : '#334155'}`
+            }}>
+              {dev.status_msg || 'SIAP BELAJAR'}
+            </span>
+            <span style={{
+              display: 'inline-block', padding: '4px 12px', borderRadius: 99, fontSize: '0.76rem', fontWeight: 700,
+              background: 'rgba(59,130,246,0.18)', color: '#93c5fd', border: '1px solid #3b82f6'
+            }}>
+              Mapel: {activeSubject}
+            </span>
+          </div>
 
           <div style={{ fontSize: '3.2rem', fontWeight: 800, margin: '10px 0 4px', fontVariantNumeric: 'tabular-nums' }}>
             {formatDuration(dev.elapsed_sec)}
@@ -604,17 +694,17 @@ export default function DashboardPage() {
             }} />
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 14 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 12 }}>
             <button
               disabled={sendingCmd}
               onClick={() => sendControl('start_pause')}
               style={{
-                background: dev.session_state === 1 ? '#f59e0b' : '#10b981',
-                color: dev.session_state === 1 ? '#080d1a' : '#fff',
+                background: isStudying ? '#f59e0b' : '#10b981',
+                color: isStudying ? '#080d1a' : '#fff',
                 border: 'none', borderRadius: 10, padding: '11px', fontWeight: 700, cursor: 'pointer'
               }}
             >
-              {dev.session_state === 1 ? 'Jeda Sesi' : dev.session_state === 2 ? 'Lanjut Belajar' : 'Mulai Belajar'}
+              {isStudying ? 'Jeda Sesi' : dev.session_state === 2 ? 'Lanjut Belajar' : 'Mulai Belajar'}
             </button>
             <button
               disabled={sendingCmd}
@@ -651,7 +741,55 @@ export default function DashboardPage() {
             </button>
           </div>
 
-          <div style={{ marginTop: 14, textAlign: 'left' }}>
+          {/* PILIH MATA PELAJARAN SESI */}
+          <div style={{ marginTop: 14, textAlign: 'left', paddingTop: 12, borderTop: '1px solid #1e293b' }}>
+            <div style={{ fontSize: '0.76rem', color: '#94a3b8', marginBottom: 6 }}>Tag Mata Pelajaran Sesi Ini:</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+              {PRESET_SUBJECTS.map((subj) => (
+                <button
+                  key={subj}
+                  onClick={() => handleSelectSubject(subj)}
+                  style={{
+                    background: activeSubject === subj ? '#2563eb' : '#17223b',
+                    color: activeSubject === subj ? '#fff' : '#cbd5e1',
+                    border: `1px solid ${activeSubject === subj ? '#60a5fa' : '#2b3c5e'}`,
+                    borderRadius: 7, padding: '4px 9px', fontSize: '0.74rem', fontWeight: 600, cursor: 'pointer'
+                  }}
+                >
+                  {subj}
+                </button>
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+              <input
+                type="text"
+                placeholder="Atau ketik mapel lain..."
+                value={customSubjectInput}
+                onChange={(e) => setCustomSubjectInput(e.target.value)}
+                style={{
+                  flex: 1, padding: '6px 9px', borderRadius: 7, border: '1px solid #2b3c5e',
+                  background: '#080d1a', color: '#fff', fontSize: '0.76rem'
+                }}
+              />
+              <button
+                onClick={() => {
+                  if (customSubjectInput.trim()) {
+                    handleSelectSubject(customSubjectInput);
+                    setCustomSubjectInput('');
+                  }
+                }}
+                style={{
+                  background: '#334155', color: '#fff', border: 'none', borderRadius: 7,
+                  padding: '0 10px', fontSize: '0.75rem', fontWeight: 700, cursor: 'pointer'
+                }}
+              >
+                Pilih
+              </button>
+            </div>
+          </div>
+
+          {/* PILIH TARGET DURASI */}
+          <div style={{ marginTop: 12, textAlign: 'left' }}>
             <div style={{ fontSize: '0.76rem', color: '#94a3b8', marginBottom: 6 }}>Atur Target Durasi Jarak Jauh:</div>
             <div style={{ display: 'flex', gap: 6 }}>
               {[15, 30, 45, 60, 90].map((m) => (
@@ -672,6 +810,7 @@ export default function DashboardPage() {
           </div>
         </div>
 
+        {/* KOLOM KANAN: TARGET HARIAN & 4 SENSOR */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <div style={{
             background: '#11192c', border: '1px solid #23314d', borderRadius: 14, padding: 15,
@@ -717,8 +856,8 @@ export default function DashboardPage() {
               <div style={{ fontSize: '1.4rem', fontWeight: 800, margin: '5px 0', color: '#f59e0b' }}>
                 {dev.distractions || 0} kali
               </div>
-              <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>
-                Waktu Fokus: {formatDuration(dev.focus_sec)}
+              <div style={{ fontSize: '0.73rem', color: '#94a3b8' }}>
+                Pergi: <strong style={{ color: '#cbd5e1' }}>{dev.away_distractions ?? (dev.distractions || 0)}x</strong> &bull; Getar: <strong style={{ color: '#cbd5e1' }}>{dev.vib_distractions ?? 0}x</strong>
               </div>
             </div>
 
@@ -745,8 +884,9 @@ export default function DashboardPage() {
         </div>
       </section>
 
+      {/* RINGKASAN STATISTIK + RINCIAN SUMBER DISTRAKSI */}
       <section style={{
-        display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+        display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))',
         gap: 12, marginBottom: 18
       }}>
         <div style={{ background: '#11192c', border: '1px solid #23314d', borderRadius: 14, padding: 16 }}>
@@ -766,41 +906,76 @@ export default function DashboardPage() {
           </div>
         </div>
         <div style={{ background: '#11192c', border: '1px solid #23314d', borderRadius: 14, padding: 16 }}>
-          <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>Total Distraksi</div>
-          <div style={{ fontSize: '1.6rem', fontWeight: 800, marginTop: 4, color: '#f59e0b' }}>
+          <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>Rincian Sumber Distraksi</div>
+          <div style={{ fontSize: '1.5rem', fontWeight: 800, marginTop: 4, color: '#f59e0b' }}>
             {summary.total_distractions} kali
+          </div>
+          <div style={{ fontSize: '0.74rem', color: '#94a3b8', marginTop: 2 }}>
+            Jarak/Pergi: <strong style={{ color: '#cbd5e1' }}>{summary.total_away_distractions}x</strong> &bull; Getar Meja: <strong style={{ color: '#cbd5e1' }}>{summary.total_vib_distractions}x</strong>
           </div>
         </div>
       </section>
 
+      {/* GRAFIK 7 HARI & DISTRIBUSI MATA PELAJARAN */}
       <section style={{
-        background: '#11192c', border: '1px solid #23314d', borderRadius: 16, padding: 18, marginBottom: 18
+        display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+        gap: 16, marginBottom: 18
       }}>
-        <h2 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: 14 }}>Grafik Menit Fokus (7 Hari Terakhir)</h2>
-        {chart.length === 0 ? (
-          <p style={{ fontSize: '0.84rem', color: '#94a3b8' }}>Belum ada data sesi dalam 7 hari terakhir.</p>
-        ) : (
-          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 12, height: 140, paddingTop: 16 }}>
-            {chart.map((item) => {
-              const barHeight = Math.max(8, Math.round(((item.focus_minutes || 0) / maxChartMin) * 100));
-              return (
-                <div key={item.day_label} style={{ flex: 1, textAlign: 'center' }}>
-                  <div style={{ fontSize: '0.72rem', color: '#cbd5e1', marginBottom: 4 }}>{item.focus_minutes}m</div>
-                  <div style={{
-                    height: `${barHeight}px`, background: 'linear-gradient(180deg, #3b82f6, #10b981)',
-                    borderRadius: '6px 6px 0 0', margin: '0 auto', maxWidth: 42
-                  }} />
-                  <div style={{ fontSize: '0.74rem', color: '#94a3b8', marginTop: 6 }}>{item.day_label}</div>
-                </div>
-              );
-            })}
-          </div>
-        )}
+        <div style={{ background: '#11192c', border: '1px solid #23314d', borderRadius: 16, padding: 18 }}>
+          <h2 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: 14 }}>Grafik Menit Fokus (7 Hari Terakhir)</h2>
+          {chart.length === 0 ? (
+            <p style={{ fontSize: '0.84rem', color: '#94a3b8' }}>Belum ada data sesi dalam 7 hari terakhir.</p>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'flex-end', gap: 12, height: 145, paddingTop: 16 }}>
+              {chart.map((item) => {
+                const barHeight = Math.max(8, Math.round(((item.focus_minutes || 0) / maxChartMin) * 100));
+                return (
+                  <div key={item.day_label} style={{ flex: 1, textAlign: 'center' }}>
+                    <div style={{ fontSize: '0.72rem', color: '#cbd5e1', marginBottom: 4 }}>{item.focus_minutes}m</div>
+                    <div style={{
+                      height: `${barHeight}px`, background: 'linear-gradient(180deg, #3b82f6, #10b981)',
+                      borderRadius: '6px 6px 0 0', margin: '0 auto', maxWidth: 42
+                    }} />
+                    <div style={{ fontSize: '0.74rem', color: '#94a3b8', marginTop: 6 }}>{item.day_label}</div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <div style={{ background: '#11192c', border: '1px solid #23314d', borderRadius: 16, padding: 18 }}>
+          <h2 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: 14 }}>Distribusi Fokus per Mata Pelajaran</h2>
+          {subjectStats.length === 0 ? (
+            <p style={{ fontSize: '0.84rem', color: '#94a3b8' }}>Belum ada distribusi mata pelajaran tercatat.</p>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {subjectStats.map((st) => {
+                const wPct = Math.max(6, Math.round(((st.focus_minutes || 0) / maxSubjectMin) * 100));
+                return (
+                  <div key={st.subject}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginBottom: 4 }}>
+                      <strong style={{ color: '#e2e8f0' }}>{st.subject}</strong>
+                      <span style={{ color: '#94a3b8' }}>{st.focus_minutes} menit ({st.session_count} sesi)</span>
+                    </div>
+                    <div style={{ width: '100%', height: 7, background: '#080d1a', borderRadius: 99, overflow: 'hidden' }}>
+                      <div style={{
+                        width: `${wPct}%`, height: '100%',
+                        background: 'linear-gradient(90deg, #3b82f6, #10b981)'
+                      }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </section>
 
+      {/* TABEL RIWAYAT SESI DATABASE + CATATAN + EKSPOR CSV */}
       <section style={{ background: '#11192c', border: '1px solid #23314d', borderRadius: 16, padding: 18 }}>
         <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-          <h2 style={{ fontSize: '1rem', fontWeight: 700 }}>Riwayat Sesi Belajar (Neon PostgreSQL)</h2>
+          <h2 style={{ fontSize: '1rem', fontWeight: 700 }}>Jurnal &amp; Riwayat Sesi Belajar (Neon PostgreSQL)</h2>
           <div style={{ display: 'flex', gap: 8 }}>
             <button
               onClick={handleExportCsv}
@@ -824,13 +999,13 @@ export default function DashboardPage() {
         </div>
 
         <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.84rem' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.83rem' }}>
             <thead>
               <tr style={{ borderBottom: '1px solid #23314d', color: '#94a3b8', textAlign: 'left' }}>
-                <th style={{ padding: '10px 8px' }}>Waktu</th>
-                <th style={{ padding: '10px 8px' }}>Durasi / Target</th>
-                <th style={{ padding: '10px 8px' }}>Fokus Murni</th>
+                <th style={{ padding: '10px 8px' }}>Waktu &amp; Mapel</th>
+                <th style={{ padding: '10px 8px' }}>Durasi / Fokus</th>
                 <th style={{ padding: '10px 8px' }}>Distraksi</th>
+                <th style={{ padding: '10px 8px' }}>Catatan Materi</th>
                 <th style={{ padding: '10px 8px' }}>Status</th>
               </tr>
             </thead>
@@ -842,27 +1017,108 @@ export default function DashboardPage() {
                   </td>
                 </tr>
               ) : (
-                sessions.map((s) => (
-                  <tr key={s.id} style={{ borderBottom: '1px solid #17223b' }}>
-                    <td style={{ padding: '10px 8px', color: '#cbd5e1' }}>{formatDateWIB(s.created_at)}</td>
-                    <td style={{ padding: '10px 8px', fontWeight: 600 }}>
-                      {formatDuration(s.elapsed_sec)} / {s.target_min}m
-                    </td>
-                    <td style={{ padding: '10px 8px', color: '#34d399', fontWeight: 700 }}>
-                      {s.focus_pct}% ({formatDuration(s.focus_sec)})
-                    </td>
-                    <td style={{ padding: '10px 8px', color: '#fbbf24' }}>{s.distractions} kali</td>
-                    <td style={{ padding: '10px 8px' }}>
-                      <span style={{
-                        padding: '3px 9px', borderRadius: 6, fontSize: '0.74rem', fontWeight: 700,
-                        background: s.completed ? 'rgba(16,185,129,0.18)' : 'rgba(245,158,11,0.18)',
-                        color: s.completed ? '#34d399' : '#fbbf24'
-                      }}>
-                        {s.completed ? 'Tercapai' : 'Dihentikan'}
-                      </span>
-                    </td>
-                  </tr>
-                ))
+                sessions.map((s) => {
+                  const isEditing = editingSessionId === s.id;
+                  return (
+                    <tr key={s.id} style={{ borderBottom: '1px solid #17223b', verticalAlign: 'top' }}>
+                      <td style={{ padding: '10px 8px' }}>
+                        <div style={{ color: '#cbd5e1', fontSize: '0.78rem' }}>{formatDateWIB(s.created_at)}</div>
+                        <span style={{
+                          display: 'inline-block', marginTop: 4, padding: '2px 8px', borderRadius: 6,
+                          fontSize: '0.72rem', fontWeight: 700, background: 'rgba(59,130,246,0.18)', color: '#93c5fd'
+                        }}>
+                          {s.subject || 'Umum'}
+                        </span>
+                      </td>
+                      <td style={{ padding: '10px 8px' }}>
+                        <div style={{ fontWeight: 600 }}>{formatDuration(s.elapsed_sec)} / {s.target_min}m</div>
+                        <div style={{ color: '#34d399', fontWeight: 700, fontSize: '0.78rem' }}>
+                          Fokus {s.focus_pct}% ({formatDuration(s.focus_sec)})
+                        </div>
+                      </td>
+                      <td style={{ padding: '10px 8px' }}>
+                        <div style={{ color: '#fbbf24', fontWeight: 700 }}>{s.distractions} kali</div>
+                        <div style={{ fontSize: '0.72rem', color: '#94a3b8' }}>
+                          J:{s.away_distractions ?? s.distractions} &bull; G:{s.vib_distractions ?? 0}
+                        </div>
+                      </td>
+                      <td style={{ padding: '10px 8px', minWidth: 190 }}>
+                        {isEditing ? (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            <input
+                              type="text"
+                              value={editSubjectText}
+                              onChange={(e) => setEditSubjectText(e.target.value)}
+                              placeholder="Mata pelajaran"
+                              style={{
+                                padding: '5px 8px', borderRadius: 6, border: '1px solid #334155',
+                                background: '#080d1a', color: '#fff', fontSize: '0.76rem'
+                              }}
+                            />
+                            <input
+                              type="text"
+                              value={editNoteText}
+                              onChange={(e) => setEditNoteText(e.target.value)}
+                              placeholder="Tulis materi yang dipelajari..."
+                              style={{
+                                padding: '5px 8px', borderRadius: 6, border: '1px solid #334155',
+                                background: '#080d1a', color: '#fff', fontSize: '0.76rem'
+                              }}
+                            />
+                            <div style={{ display: 'flex', gap: 6 }}>
+                              <button
+                                onClick={() => handleSaveSessionEdit(s.id)}
+                                style={{
+                                  background: '#10b981', color: '#fff', border: 'none', borderRadius: 6,
+                                  padding: '4px 10px', fontSize: '0.72rem', fontWeight: 700, cursor: 'pointer'
+                                }}
+                              >
+                                Simpan
+                              </button>
+                              <button
+                                onClick={() => setEditingSessionId(null)}
+                                style={{
+                                  background: '#334155', color: '#fff', border: 'none', borderRadius: 6,
+                                  padding: '4px 10px', fontSize: '0.72rem', cursor: 'pointer'
+                                }}
+                              >
+                                Batal
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div>
+                            <div style={{ color: s.note ? '#e2e8f0' : '#64748b', fontSize: '0.78rem', fontStyle: s.note ? 'normal' : 'italic' }}>
+                              {s.note || 'Belum ada catatan'}
+                            </div>
+                            <button
+                              onClick={() => {
+                                setEditingSessionId(s.id);
+                                setEditSubjectText(s.subject || 'Umum');
+                                setEditNoteText(s.note || '');
+                              }}
+                              style={{
+                                marginTop: 4, background: 'transparent', color: '#60a5fa', border: 'none',
+                                fontSize: '0.72rem', fontWeight: 600, cursor: 'pointer', padding: 0
+                              }}
+                            >
+                              {s.note ? 'Edit Catatan / Mapel' : '+ Tambah Catatan'}
+                            </button>
+                          </div>
+                        )}
+                      </td>
+                      <td style={{ padding: '10px 8px' }}>
+                        <span style={{
+                          padding: '3px 9px', borderRadius: 6, fontSize: '0.74rem', fontWeight: 700,
+                          background: s.completed ? 'rgba(16,185,129,0.18)' : 'rgba(245,158,11,0.18)',
+                          color: s.completed ? '#34d399' : '#fbbf24'
+                        }}>
+                          {s.completed ? 'Tercapai' : 'Dihentikan'}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>

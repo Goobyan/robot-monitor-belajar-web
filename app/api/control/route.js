@@ -24,6 +24,26 @@ export async function POST(request) {
       return NextResponse.json({ ok: true, message: 'Riwayat database dihapus' });
     }
 
+    if (action === 'set_subject') {
+      const subject = val.trim().slice(0, 40) || 'Umum';
+      await sql`UPDATE device_state SET current_subject = ${subject} WHERE id = 1`;
+      return NextResponse.json({ ok: true, subject });
+    }
+
+    if (action === 'update_session') {
+      const sessionId = Number(body.sessionId || 0);
+      const subject = String(body.subject || 'Umum').trim().slice(0, 40) || 'Umum';
+      const note = String(body.note || '').trim().slice(0, 200);
+      if (sessionId > 0) {
+        await sql`
+          UPDATE study_sessions
+          SET subject = ${subject}, note = ${note}
+          WHERE id = ${sessionId}
+        `;
+      }
+      return NextResponse.json({ ok: true });
+    }
+
     if (action === 'save_config') {
       const cfg = body.config || {};
       await sql`
@@ -42,17 +62,23 @@ export async function POST(request) {
       return NextResponse.json({ ok: true, message: 'Kalibrasi disimpan' });
     }
 
-    const allowedActions = ['start_pause', 'stop', 'toggle_mute', 'oled_info', 'set_target', 'ping'];
+    const allowedActions = [
+      'start_pause',
+      'stop',
+      'toggle_mute',
+      'oled_info',
+      'set_target',
+      'ping'
+    ];
     if (!allowedActions.includes(action)) {
       return NextResponse.json({ ok: false, error: 'Perintah tidak dikenal' }, { status: 400 });
     }
 
-    // Batalkan perintah lama yang belum sempat dieksekusi agar antrean bersih
     await sql`UPDATE device_commands SET executed = TRUE WHERE executed = FALSE`;
 
     await sql`
       INSERT INTO device_commands (action, val, executed)
-      VALUES (${action}, ${val}, FALSE)
+      VALUES (${action}, ${val.slice(0, 200)}, FALSE)
     `;
 
     return NextResponse.json({ ok: true });
