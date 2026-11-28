@@ -24,18 +24,111 @@ function formatDateWIB(isoStr) {
   }
 }
 
+function formatTimeOnlyWIB(isoStr) {
+  if (!isoStr) return '';
+  try {
+    return new Date(isoStr).toLocaleTimeString('id-ID', {
+      timeZone: 'Asia/Jakarta',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  } catch {
+    return '';
+  }
+}
+
+function RobotEyeAvatar({ expression }) {
+  const expr = String(expression || 'Normal');
+  const isAngry = expr.includes('Marah');
+  const isHappy = expr.includes('Bahagia');
+  const isStudy = expr.includes('Fokus');
+  const isSuspicious = expr.includes('Curiga') || expr.includes('Ngantuk');
+
+  const eyeColor = isAngry ? '#f87171' : isHappy ? '#34d399' : isStudy ? '#60a5fa' : '#e2e8f0';
+
+  return (
+    <div style={{
+      background: '#070b14',
+      border: `1.5px solid ${isAngry ? '#ef4444' : isHappy ? '#10b981' : '#263554'}`,
+      borderRadius: 14,
+      padding: '8px 14px',
+      display: 'inline-flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      boxShadow: isAngry
+        ? '0 0 18px rgba(239,68,68,0.28)'
+        : isStudy
+        ? '0 0 18px rgba(59,130,246,0.22)'
+        : 'none'
+    }}>
+      <svg width="112" height="44" viewBox="0 0 112 44" className={isAngry ? 'robot-eye-angry' : 'robot-eye-blink'}>
+        {/* Mata Kiri */}
+        <g>
+          <rect x="6" y="6" width="42" height="32" rx="13" fill={eyeColor} />
+          {isHappy ? (
+            <circle cx="27" cy="39" r="22" fill="#070b14" />
+          ) : (
+            <g className={isStudy ? 'robot-pupil-scan' : ''}>
+              <circle cx="27" cy="22" r="8.5" fill="#070b14" />
+              <circle cx="24" cy="19" r="2.2" fill="#ffffff" />
+            </g>
+          )}
+          {isAngry && <polygon points="4,4 50,4 50,21" fill="#070b14" />}
+          {isSuspicious && <rect x="4" y="4" width="46" height="11" fill="#070b14" />}
+        </g>
+
+        {/* Mata Kanan */}
+        <g>
+          <rect x="64" y="6" width="42" height="32" rx="13" fill={eyeColor} />
+          {isHappy ? (
+            <circle cx="85" cy="39" r="22" fill="#070b14" />
+          ) : (
+            <g className={isStudy ? 'robot-pupil-scan' : ''}>
+              <circle cx="85" cy="22" r="8.5" fill="#070b14" />
+              <circle cx="82" cy="19" r="2.2" fill="#ffffff" />
+            </g>
+          )}
+          {isAngry && <polygon points="62,4 108,4 62,21" fill="#070b14" />}
+          {isSuspicious && <rect x="62" y="4" width="46" height="11" fill="#070b14" />}
+        </g>
+      </svg>
+      <span style={{ fontSize: '0.7rem', color: '#94a3b8', marginTop: 2 }}>
+        OLED: <strong style={{ color: eyeColor }}>{expr}</strong>
+      </span>
+    </div>
+  );
+}
+
 export default function DashboardPage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [sendingCmd, setSendingCmd] = useState(false);
   const [syncingHardware, setSyncingHardware] = useState(false);
+  const [pinging, setPinging] = useState(false);
+  const [showCalib, setShowCalib] = useState(false);
   const [toast, setToast] = useState('');
 
+  // State PIN Lock
+  const [pinInput, setPinInput] = useState('');
+  const [pinError, setPinError] = useState('');
+
+  // Form Kalibrasi Jarak Jauh
+  const [cfgForm, setCfgForm] = useState({
+    minDist: 10,
+    maxDist: 40,
+    graceSec: 5,
+    spamSec: 3,
+    ldrThr: 2500,
+    ldrHigh: true,
+    dailyGoalMin: 120
+  });
+  const cfgInitializedRef = useRef(false);
   const optimisticLockRef = useRef({ until: 0, patch: null });
+  const pingWatchRef = useRef({ active: false, baselineUpdatedAt: null, deadline: 0 });
 
   const showToast = (msg) => {
     setToast(msg);
-    setTimeout(() => setToast(''), 2500);
+    setTimeout(() => setToast(''), 2800);
   };
 
   const fetchDashboard = useCallback(async () => {
@@ -43,6 +136,39 @@ export default function DashboardPage() {
       const res = await fetch(`/api/dashboard?t=${Date.now()}`, { cache: 'no-store' });
       const json = await res.json();
       if (json.ok) {
+        if (json.locked) {
+          setData({ locked: true });
+          setLoading(false);
+          return;
+        }
+
+        // Cek apakah ESP32 sudah membalas perintah PING
+        const pw = pingWatchRef.current;
+        if (pw.active && json.device) {
+          if (json.device.updated_at && json.device.updated_at !== pw.baselineUpdatedAt) {
+            pw.active = false;
+            setPinging(false);
+            showToast('Tersinkron! ESP32 merespons dengan data terbaru.');
+          } else if (Date.now() > pw.deadline) {
+            pw.active = false;
+            setPinging(false);
+            showToast('ESP32 tidak merespons (kemungkinan Offline).');
+          }
+        }
+
+        if (!cfgInitializedRef.current && json.config) {
+          cfgInitializedRef.current = true;
+          setCfgForm({
+            minDist: json.config.min_dist ?? 10,
+            maxDist: json.config.max_dist ?? 40,
+            graceSec: json.config.grace_sec ?? 5,
+            spamSec: json.config.spam_sec ?? 3,
+            ldrThr: json.config.ldr_thr ?? 2500,
+            ldrHigh: Boolean(json.config.ldr_high),
+            dailyGoalMin: json.config.daily_goal_min ?? 120
+          });
+        }
+
         const lock = optimisticLockRef.current;
         if (lock.patch && Date.now() < lock.until && json.device) {
           const matchesServer = Object.entries(lock.patch).every(
@@ -75,9 +201,31 @@ export default function DashboardPage() {
 
   useEffect(() => {
     fetchDashboard();
-    const timer = setInterval(fetchDashboard, 2000);
+    const timer = setInterval(fetchDashboard, pinging ? 1200 : 2500);
     return () => clearInterval(timer);
-  }, [fetchDashboard]);
+  }, [fetchDashboard, pinging]);
+
+  const handleUnlockPin = async (e) => {
+    e.preventDefault();
+    setPinError('');
+    try {
+      const res = await fetch('/api/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin: pinInput })
+      });
+      const json = await res.json();
+      if (json.ok) {
+        setPinInput('');
+        setLoading(true);
+        fetchDashboard();
+      } else {
+        setPinError(json.error || 'PIN tidak valid');
+      }
+    } catch {
+      setPinError('Gagal memeriksa PIN');
+    }
+  };
 
   const applyOptimisticChange = (action, val) => {
     if (!data?.device) return;
@@ -129,12 +277,10 @@ export default function DashboardPage() {
       });
       const json = await res.json();
       if (json.ok) {
-        showToast(
-          data?.isOnline
-            ? 'Perintah dikirim ke ESP32!'
-            : 'Perintah antre (ESP32 sedang Offline)'
-        );
-        setTimeout(fetchDashboard, 1500);
+        if (action !== 'ping') {
+          showToast('Perintah dikirim ke ESP32!');
+        }
+        setTimeout(fetchDashboard, 1200);
       }
     } catch {
       optimisticLockRef.current = { until: 0, patch: null };
@@ -145,6 +291,66 @@ export default function DashboardPage() {
     }
   };
 
+  const handleManualPing = async () => {
+    setPinging(true);
+    pingWatchRef.current = {
+      active: true,
+      baselineUpdatedAt: data?.device?.updated_at || null,
+      deadline: Date.now() + 14000
+    };
+    await sendControl('ping');
+  };
+
+  const handleSaveRemoteConfig = async (e) => {
+    e.preventDefault();
+    setSendingCmd(true);
+    try {
+      const res = await fetch('/api/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'save_config', config: cfgForm })
+      });
+      const json = await res.json();
+      if (json.ok) {
+        showToast('Kalibrasi disimpan! ESP32 akan menerapkan otomatis.');
+        setShowCalib(false);
+        fetchDashboard();
+      }
+    } catch {
+      showToast('Gagal menyimpan kalibrasi');
+    } finally {
+      setSendingCmd(false);
+    }
+  };
+
+  const handleExportCsv = () => {
+    const list = data?.sessions || [];
+    if (list.length === 0) {
+      showToast('Belum ada data riwayat untuk diekspor');
+      return;
+    }
+    const header = 'ID,Waktu_WIB,Target_Menit,Durasi_Detik,Fokus_Detik,Persentase_Fokus,Distraksi,Status\n';
+    const rows = list.map((s) =>
+      [
+        s.id,
+        `"${formatDateWIB(s.created_at)}"`,
+        s.target_min,
+        s.elapsed_sec,
+        s.focus_sec,
+        `${s.focus_pct}%`,
+        s.distractions,
+        s.completed ? 'Tercapai' : 'Dihentikan'
+      ].join(',')
+    );
+    const blob = new Blob([header + rows.join('\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `laporan-robot-belajar-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const handleClearHistory = async () => {
     if (!window.confirm('Hapus seluruh riwayat sesi belajar di database Neon?')) return;
     await sendControl('clear_history');
@@ -153,17 +359,63 @@ export default function DashboardPage() {
 
   if (loading && !data) {
     return (
-      <div style={{ maxWidth: 960, margin: '60px auto', textAlign: 'center', color: '#94a3b8' }}>
+      <div style={{ maxWidth: 960, margin: '80px auto', textAlign: 'center', color: '#94a3b8' }}>
         Memuat Dashboard Robot Monitor Belajar...
       </div>
     );
   }
 
+  // Layar Kunci PIN jika DASHBOARD_PIN aktif
+  if (data?.locked) {
+    return (
+      <main style={{ maxWidth: 380, margin: '90px auto', padding: 20 }}>
+        <div style={{
+          background: '#11192c', border: '1px solid #23314d', borderRadius: 18, padding: 26, textAlign: 'center'
+        }}>
+          <h1 style={{ fontSize: '1.25rem', fontWeight: 800, marginBottom: 6 }}>Robot Monitor Belajar</h1>
+          <p style={{ fontSize: '0.84rem', color: '#94a3b8', marginBottom: 18 }}>
+            Masukkan PIN Dashboard untuk mengakses kontrol perangkat dan statistik.
+          </p>
+          <form onSubmit={handleUnlockPin}>
+            <input
+              type="password"
+              inputMode="numeric"
+              placeholder="Masukkan PIN"
+              value={pinInput}
+              onChange={(e) => setPinInput(e.target.value)}
+              style={{
+                width: '100%', padding: '12px', borderRadius: 10, border: '1px solid #334155',
+                background: '#080d1a', color: '#fff', fontSize: '1.1rem', textAlign: 'center',
+                letterSpacing: '4px', marginBottom: 12
+              }}
+            />
+            {pinError && (
+              <div style={{ color: '#f87171', fontSize: '0.8rem', marginBottom: 10 }}>{pinError}</div>
+            )}
+            <button
+              type="submit"
+              style={{
+                width: '100%', background: '#3b82f6', color: '#fff', border: 'none',
+                borderRadius: 10, padding: '12px', fontWeight: 700, cursor: 'pointer'
+              }}
+            >
+              Buka Dashboard
+            </button>
+          </form>
+        </div>
+      </main>
+    );
+  }
+
   const dev = data?.device || {};
-  const isOnline = Boolean(data?.isOnline);
+  const connStatus = data?.connectionStatus || 'offline';
   const summary = data?.summary || { total_sessions: 0, total_focus_sec: 0, total_distractions: 0, avg_focus_pct: 100 };
   const sessions = data?.sessions || [];
   const chart = data?.dailyChart || [];
+  const todayFocusMin = Number(data?.todayFocusMin || 0);
+  const streakDays = Number(data?.streakDays || 0);
+  const dailyGoalMin = Number(cfgForm.dailyGoalMin || 120);
+  const dailyPct = dailyGoalMin > 0 ? Math.min(100, Math.round((todayFocusMin / dailyGoalMin) * 100)) : 0;
 
   const targetTotalSec = (dev.target_min || 30) * 60;
   const progressPct = targetTotalSec > 0 ? Math.min(100, ((dev.elapsed_sec || 0) / targetTotalSec) * 100) : 0;
@@ -172,68 +424,160 @@ export default function DashboardPage() {
 
   const isAlert = dev.vibrating || (!dev.in_range && dev.session_state === 1);
 
+  const statusMeta = {
+    online: { color: '#10b981', label: 'Online (Aktif)' },
+    standby: { color: '#38bdf8', label: 'Standby (Mode Hemat)' },
+    offline: { color: '#ef4444', label: 'Offline' }
+  }[connStatus];
+
   return (
-    <main style={{ maxWidth: 980, margin: '0 auto', padding: '20px 16px 48px' }}>
+    <main style={{ maxWidth: 1020, margin: '0 auto', padding: '20px 16px 52px' }}>
       {toast && (
         <div style={{
-          position: 'fixed', bottom: 20, right: 20, background: '#3b82f6', color: '#fff',
-          padding: '10px 16px', borderRadius: 10, fontWeight: 600, fontSize: 14, zIndex: 50,
-          boxShadow: '0 10px 25px rgba(0,0,0,0.4)'
+          position: 'fixed', bottom: 20, right: 20, background: '#2563eb', color: '#fff',
+          padding: '11px 16px', borderRadius: 11, fontWeight: 600, fontSize: 13.5, zIndex: 50,
+          boxShadow: '0 10px 25px rgba(0,0,0,0.45)', border: '1px solid rgba(255,255,255,0.15)'
         }}>
           {toast}
         </div>
       )}
 
-      {/* HEADER */}
+      {/* HEADER DENGAN AVATAR MATA SVG & STATUS 3-KONDISI */}
       <header style={{
         display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center',
-        gap: 12, marginBottom: 20, paddingBottom: 14, borderBottom: '1px solid #24324d'
+        gap: 14, marginBottom: 20, paddingBottom: 16, borderBottom: '1px solid #23314d'
       }}>
         <div>
-          <h1 style={{ fontSize: '1.35rem', fontWeight: 800, display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <span
+              className={connStatus === 'online' ? 'status-pulse' : ''}
+              style={{
+                width: 11, height: 11, borderRadius: '50%',
+                background: statusMeta.color,
+                boxShadow: `0 0 10px ${statusMeta.color}`
+              }}
+            />
+            <h1 style={{ fontSize: '1.35rem', fontWeight: 800 }}>Robot Monitor Belajar</h1>
             <span style={{
-              width: 11, height: 11, borderRadius: '50%',
-              background: isOnline ? '#10b981' : '#ef4444',
-              boxShadow: isOnline ? '0 0 10px #10b981' : 'none'
-            }} />
-            Robot Monitor Belajar
-          </h1>
-          <p style={{ fontSize: '0.82rem', color: '#94a3b8', marginTop: 2 }}>
-            {isOnline
-              ? `Perangkat Online • Wi-Fi: ${dev.wifi_ssid || '-'} (${dev.local_ip || '-'})`
-              : `Perangkat Offline • Sinkron terakhir: ${formatDateWIB(dev.updated_at)}`}
+              fontSize: '0.75rem', fontWeight: 700, padding: '3px 10px', borderRadius: 99,
+              background: 'rgba(255,255,255,0.06)', color: statusMeta.color, border: `1px solid ${statusMeta.color}`
+            }}>
+              {statusMeta.label}
+            </span>
+          </div>
+
+          <p style={{ fontSize: '0.8rem', color: '#94a3b8', marginTop: 5 }}>
+            {connStatus !== 'offline'
+              ? `Wi-Fi: ${dev.wifi_ssid || '-'} (${dev.local_ip || '-'}) • Sinyal: ${dev.rssi || 0} dBm`
+              : `Terakhir aktif: ${formatDateWIB(dev.updated_at)}`}
+            {dev.last_boot_at ? ` • Menyala sejak ${formatTimeOnlyWIB(dev.last_boot_at)} WIB` : ''}
           </p>
+
+          <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+            <button
+              disabled={pinging}
+              onClick={handleManualPing}
+              style={{
+                background: pinging ? '#1e3a8a' : '#1d4ed8', color: '#fff', border: '1px solid #3b82f6',
+                borderRadius: 9, padding: '6px 12px', fontSize: '0.78rem', fontWeight: 700, cursor: 'pointer'
+              }}
+            >
+              {pinging ? 'Menghubungi ESP32...' : 'Sinkronkan / Ping ESP32'}
+            </button>
+            <button
+              onClick={() => setShowCalib(!showCalib)}
+              style={{
+                background: '#17223b', color: '#cbd5e1', border: '1px solid #2b3c5e',
+                borderRadius: 9, padding: '6px 12px', fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer'
+              }}
+            >
+              {showCalib ? 'Tutup Kalibrasi' : 'Kalibrasi Sensor'}
+            </button>
+            {syncingHardware && (
+              <span style={{
+                fontSize: '0.76rem', color: '#93c5fd', alignSelf: 'center', fontWeight: 600
+              }}>
+                Menyelaraskan status...
+              </span>
+            )}
+          </div>
         </div>
 
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          {syncingHardware && (
-            <span style={{
-              background: 'rgba(59,130,246,0.18)', border: '1px solid #3b82f6', padding: '6px 10px',
-              borderRadius: 10, fontSize: '0.78rem', color: '#93c5fd', fontWeight: 600
-            }}>
-              Menyinkronkan ESP32...
-            </span>
-          )}
-          <span style={{
-            background: '#131c31', border: '1px solid #24324d', padding: '6px 12px',
-            borderRadius: 10, fontSize: '0.82rem', color: '#cbd5e1'
-          }}>
-            Ekspresi OLED: <strong>{dev.expression || 'Normal'}</strong>
-          </span>
-        </div>
+        <RobotEyeAvatar expression={dev.expression} />
       </header>
 
-      {/* PANEL UTAMA: TIMER & KONTROL DUA ARAH */}
+      {/* PANEL KALIBRASI SENSOR JARAK JAUH (COLLAPSIBLE) */}
+      {showCalib && (
+        <section style={{
+          background: '#11192c', border: '1px solid #3b82f6', borderRadius: 16, padding: 18, marginBottom: 18
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <h2 style={{ fontSize: '0.98rem', fontWeight: 700 }}>Kalibrasi Sensor &amp; Target Harian (Sinkron ke ESP32)</h2>
+            <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>Versi Config: v{data?.config?.cfg_ver || 1}</span>
+          </div>
+          <form onSubmit={handleSaveRemoteConfig}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10 }}>
+              <div>
+                <label style={{ display: 'block', fontSize: '0.75rem', color: '#94a3b8', marginBottom: 4 }}>Jarak Fokus Min (cm)</label>
+                <input type="number" value={cfgForm.minDist} onChange={(e) => setCfgForm({ ...cfgForm, minDist: Number(e.target.value) })}
+                  style={{ width: '100%', padding: 8, borderRadius: 8, border: '1px solid #2b3c5e', background: '#080d1a', color: '#fff' }} />
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: '0.75rem', color: '#94a3b8', marginBottom: 4 }}>Jarak Fokus Max (cm)</label>
+                <input type="number" value={cfgForm.maxDist} onChange={(e) => setCfgForm({ ...cfgForm, maxDist: Number(e.target.value) })}
+                  style={{ width: '100%', padding: 8, borderRadius: 8, border: '1px solid #2b3c5e', background: '#080d1a', color: '#fff' }} />
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: '0.75rem', color: '#94a3b8', marginBottom: 4 }}>Toleransi Pergi (detik)</label>
+                <input type="number" value={cfgForm.graceSec} onChange={(e) => setCfgForm({ ...cfgForm, graceSec: Number(e.target.value) })}
+                  style={{ width: '100%', padding: 8, borderRadius: 8, border: '1px solid #2b3c5e', background: '#080d1a', color: '#fff' }} />
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: '0.75rem', color: '#94a3b8', marginBottom: 4 }}>Jeda Spam Buzzer (detik)</label>
+                <input type="number" value={cfgForm.spamSec} onChange={(e) => setCfgForm({ ...cfgForm, spamSec: Number(e.target.value) })}
+                  style={{ width: '100%', padding: 8, borderRadius: 8, border: '1px solid #2b3c5e', background: '#080d1a', color: '#fff' }} />
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: '0.75rem', color: '#94a3b8', marginBottom: 4 }}>Ambang LDR (0-4095)</label>
+                <input type="number" value={cfgForm.ldrThr} onChange={(e) => setCfgForm({ ...cfgForm, ldrThr: Number(e.target.value) })}
+                  style={{ width: '100%', padding: 8, borderRadius: 8, border: '1px solid #2b3c5e', background: '#080d1a', color: '#fff' }} />
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: '0.75rem', color: '#94a3b8', marginBottom: 4 }}>Target Fokus Harian (menit)</label>
+                <input type="number" value={cfgForm.dailyGoalMin} onChange={(e) => setCfgForm({ ...cfgForm, dailyGoalMin: Number(e.target.value) })}
+                  style={{ width: '100%', padding: 8, borderRadius: 8, border: '1px solid #2b3c5e', background: '#080d1a', color: '#fff' }} />
+              </div>
+            </div>
+            <div style={{ marginTop: 12, display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button type="submit" disabled={sendingCmd} style={{
+                background: '#10b981', color: '#fff', border: 'none', borderRadius: 9,
+                padding: '9px 16px', fontWeight: 700, fontSize: '0.82rem', cursor: 'pointer'
+              }}>
+                Simpan &amp; Terapkan ke ESP32
+              </button>
+            </div>
+          </form>
+        </section>
+      )}
+
+      {/* PANEL UTAMA: TIMER AMBIENT GLOW & TELEMETRI SENSOR */}
       <section style={{
-        display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+        display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(310px, 1fr))',
         gap: 16, marginBottom: 18
       }}>
         <div style={{
-          background: '#131c31', border: '1px solid #24324d', borderRadius: 16, padding: 20, textAlign: 'center'
+          background: '#11192c',
+          border: `1.5px solid ${isAlert ? '#ef4444' : dev.session_state === 1 ? '#10b981' : '#23314d'}`,
+          boxShadow: isAlert
+            ? '0 0 28px rgba(239,68,68,0.18)'
+            : dev.session_state === 1
+            ? '0 0 28px rgba(16,185,129,0.14)'
+            : 'none',
+          borderRadius: 16, padding: 20, textAlign: 'center', transition: 'all 0.35s'
         }}>
           <span style={{
             display: 'inline-block', padding: '4px 14px', borderRadius: 99, fontSize: '0.78rem', fontWeight: 700,
-            background: isAlert ? 'rgba(239,68,68,0.2)' : dev.session_state === 1 ? 'rgba(16,185,129,0.2)' : dev.session_state === 2 ? 'rgba(245,158,11,0.2)' : '#24324d',
+            background: isAlert ? 'rgba(239,68,68,0.2)' : dev.session_state === 1 ? 'rgba(16,185,129,0.2)' : dev.session_state === 2 ? 'rgba(245,158,11,0.2)' : '#23314d',
             color: isAlert ? '#f87171' : dev.session_state === 1 ? '#34d399' : dev.session_state === 2 ? '#fbbf24' : '#e2e8f0',
             border: `1px solid ${isAlert ? '#ef4444' : dev.session_state === 1 ? '#10b981' : dev.session_state === 2 ? '#f59e0b' : '#334155'}`
           }}>
@@ -249,7 +593,7 @@ export default function DashboardPage() {
             <strong style={{ color: '#10b981' }}>{liveFocusPct}%</strong>
           </div>
 
-          <div style={{ width: '100%', height: 10, background: '#0b1120', borderRadius: 99, overflow: 'hidden', margin: '14px 0' }}>
+          <div style={{ width: '100%', height: 10, background: '#080d1a', borderRadius: 99, overflow: 'hidden', margin: '14px 0' }}>
             <div style={{
               width: `${progressPct.toFixed(1)}%`, height: '100%',
               background: 'linear-gradient(90deg, #3b82f6, #10b981)', transition: 'width 0.4s'
@@ -262,7 +606,7 @@ export default function DashboardPage() {
               onClick={() => sendControl('start_pause')}
               style={{
                 background: dev.session_state === 1 ? '#f59e0b' : '#10b981',
-                color: dev.session_state === 1 ? '#0b1120' : '#fff',
+                color: dev.session_state === 1 ? '#080d1a' : '#fff',
                 border: 'none', borderRadius: 10, padding: '11px', fontWeight: 700, cursor: 'pointer'
               }}
             >
@@ -285,8 +629,8 @@ export default function DashboardPage() {
               disabled={sendingCmd}
               onClick={() => sendControl('toggle_mute')}
               style={{
-                background: '#1e293b', color: dev.muted ? '#f87171' : '#f8fafc',
-                border: '1px solid #334155', borderRadius: 10, padding: '9px', fontWeight: 600, cursor: 'pointer'
+                background: '#17223b', color: dev.muted ? '#f87171' : '#f8fafc',
+                border: '1px solid #2b3c5e', borderRadius: 10, padding: '9px', fontWeight: 600, cursor: 'pointer'
               }}
             >
               {dev.muted ? 'Buzzer: MUTE' : 'Buzzer: AKTIF'}
@@ -295,7 +639,7 @@ export default function DashboardPage() {
               disabled={sendingCmd}
               onClick={() => sendControl('oled_info')}
               style={{
-                background: '#1e293b', color: '#f8fafc', border: '1px solid #334155',
+                background: '#17223b', color: '#f8fafc', border: '1px solid #2b3c5e',
                 borderRadius: 10, padding: '9px', fontWeight: 600, cursor: 'pointer'
               }}
             >
@@ -312,8 +656,8 @@ export default function DashboardPage() {
                   disabled={sendingCmd}
                   onClick={() => sendControl('set_target', String(m))}
                   style={{
-                    flex: 1, background: dev.target_min === m ? '#3b82f6' : '#1e293b',
-                    color: '#fff', border: '1px solid #334155', borderRadius: 8,
+                    flex: 1, background: dev.target_min === m ? '#3b82f6' : '#17223b',
+                    color: '#fff', border: '1px solid #2b3c5e', borderRadius: 8,
                     padding: '7px 0', fontSize: '0.8rem', fontWeight: 700, cursor: 'pointer'
                   }}
                 >
@@ -324,45 +668,75 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* DATA SENSOR REAL-TIME */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-          <div style={{ background: '#131c31', border: '1px solid #24324d', borderRadius: 14, padding: 16 }}>
-            <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>Jarak Pengguna (HC-SR04)</div>
-            <div style={{ fontSize: '1.5rem', fontWeight: 800, margin: '6px 0' }}>
-              {Number(dev.distance_cm) > 250 ? '> 250 cm' : `${Number(dev.distance_cm || 0).toFixed(1)} cm`}
+        {/* KOLOM KANAN: TARGET HARIAN & 4 SENSOR */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div style={{
+            background: '#11192c', border: '1px solid #23314d', borderRadius: 14, padding: 15,
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center'
+          }}>
+            <div>
+              <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>Progres Fokus Hari Ini</div>
+              <div style={{ fontSize: '1.35rem', fontWeight: 800, marginTop: 2 }}>
+                {todayFocusMin} <span style={{ fontSize: '0.85rem', color: '#94a3b8', fontWeight: 500 }}>/ {dailyGoalMin} menit ({dailyPct}%)</span>
+              </div>
+              <div style={{ fontSize: '0.78rem', color: '#34d399', marginTop: 3, fontWeight: 600 }}>
+                Streak Aktif: {streakDays} hari berturut-turut
+              </div>
             </div>
-            <div style={{ fontSize: '0.76rem', color: dev.in_range ? '#34d399' : '#fbbf24' }}>
-              {dev.in_range ? 'Posisi Fokus Ideal' : 'Di Luar Rentang Fokus'}
-            </div>
-          </div>
-
-          <div style={{ background: '#131c31', border: '1px solid #24324d', borderRadius: 14, padding: 16 }}>
-            <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>Distraksi Sesi Ini</div>
-            <div style={{ fontSize: '1.5rem', fontWeight: 800, margin: '6px 0', color: '#f59e0b' }}>
-              {dev.distractions || 0} kali
-            </div>
-            <div style={{ fontSize: '0.76rem', color: '#94a3b8' }}>
-              Waktu Fokus: {formatDuration(dev.focus_sec)}
-            </div>
-          </div>
-
-          <div style={{ background: '#131c31', border: '1px solid #24324d', borderRadius: 14, padding: 16 }}>
-            <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>Pencahayaan (LDR)</div>
-            <div style={{ fontSize: '1.35rem', fontWeight: 800, margin: '6px 0', color: dev.is_dark ? '#fbbf24' : '#34d399' }}>
-              {dev.is_dark ? 'REDUP' : 'TERANG'}
-            </div>
-            <div style={{ fontSize: '0.76rem', color: '#94a3b8' }}>
-              Nilai ADC: {dev.ldr_raw || 0} / 4095
+            <div style={{
+              width: 54, height: 54, borderRadius: '50%',
+              background: `conic-gradient(#10b981 ${dailyPct * 3.6}deg, #1e293b 0deg)`,
+              display: 'flex', alignItems: 'center', justifyContent: 'center'
+            }}>
+              <div style={{
+                width: 42, height: 42, borderRadius: '50%', background: '#11192c',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontSize: '0.76rem', fontWeight: 800
+              }}>
+                {dailyPct}%
+              </div>
             </div>
           </div>
 
-          <div style={{ background: '#131c31', border: '1px solid #24324d', borderRadius: 14, padding: 16 }}>
-            <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>Getaran Meja (SW-420)</div>
-            <div style={{ fontSize: '1.35rem', fontWeight: 800, margin: '6px 0', color: dev.vibrating ? '#f87171' : '#34d399' }}>
-              {dev.vibrating ? 'BERGETAR!' : 'AMAN'}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, flex: 1 }}>
+            <div style={{ background: '#11192c', border: '1px solid #23314d', borderRadius: 14, padding: 15 }}>
+              <div style={{ fontSize: '0.76rem', color: '#94a3b8' }}>Jarak Pengguna (HC-SR04)</div>
+              <div style={{ fontSize: '1.4rem', fontWeight: 800, margin: '5px 0' }}>
+                {Number(dev.distance_cm) > 250 ? '> 250 cm' : `${Number(dev.distance_cm || 0).toFixed(1)} cm`}
+              </div>
+              <div style={{ fontSize: '0.75rem', color: dev.in_range ? '#34d399' : '#fbbf24' }}>
+                {dev.in_range ? 'Posisi Fokus Ideal' : 'Di Luar Rentang Fokus'}
+              </div>
             </div>
-            <div style={{ fontSize: '0.76rem', color: '#94a3b8' }}>
-              {dev.vibrating ? 'Gangguan terdeteksi' : 'Meja dalam kondisi tenang'}
+
+            <div style={{ background: '#11192c', border: '1px solid #23314d', borderRadius: 14, padding: 15 }}>
+              <div style={{ fontSize: '0.76rem', color: '#94a3b8' }}>Distraksi Sesi Ini</div>
+              <div style={{ fontSize: '1.4rem', fontWeight: 800, margin: '5px 0', color: '#f59e0b' }}>
+                {dev.distractions || 0} kali
+              </div>
+              <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>
+                Waktu Fokus: {formatDuration(dev.focus_sec)}
+              </div>
+            </div>
+
+            <div style={{ background: '#11192c', border: '1px solid #23314d', borderRadius: 14, padding: 15 }}>
+              <div style={{ fontSize: '0.76rem', color: '#94a3b8' }}>Pencahayaan (LDR)</div>
+              <div style={{ fontSize: '1.3rem', fontWeight: 800, margin: '5px 0', color: dev.is_dark ? '#fbbf24' : '#34d399' }}>
+                {dev.is_dark ? 'REDUP' : 'TERANG'}
+              </div>
+              <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>
+                ADC: {dev.ldr_raw || 0} / 4095
+              </div>
+            </div>
+
+            <div style={{ background: '#11192c', border: '1px solid #23314d', borderRadius: 14, padding: 15 }}>
+              <div style={{ fontSize: '0.76rem', color: '#94a3b8' }}>Getaran Meja (SW-420)</div>
+              <div style={{ fontSize: '1.3rem', fontWeight: 800, margin: '5px 0', color: dev.vibrating ? '#f87171' : '#34d399' }}>
+                {dev.vibrating ? 'BERGETAR!' : 'AMAN'}
+              </div>
+              <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>
+                {dev.vibrating ? 'Gangguan terdeteksi' : 'Meja dalam kondisi tenang'}
+              </div>
             </div>
           </div>
         </div>
@@ -373,23 +747,23 @@ export default function DashboardPage() {
         display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
         gap: 12, marginBottom: 18
       }}>
-        <div style={{ background: '#131c31', border: '1px solid #24324d', borderRadius: 14, padding: 16 }}>
+        <div style={{ background: '#11192c', border: '1px solid #23314d', borderRadius: 14, padding: 16 }}>
           <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>Total Sesi Tercatat</div>
           <div style={{ fontSize: '1.6rem', fontWeight: 800, marginTop: 4 }}>{summary.total_sessions}</div>
         </div>
-        <div style={{ background: '#131c31', border: '1px solid #24324d', borderRadius: 14, padding: 16 }}>
+        <div style={{ background: '#11192c', border: '1px solid #23314d', borderRadius: 14, padding: 16 }}>
           <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>Akumulasi Waktu Fokus</div>
           <div style={{ fontSize: '1.6rem', fontWeight: 800, marginTop: 4, color: '#10b981' }}>
             {Math.round((summary.total_focus_sec || 0) / 60)} menit
           </div>
         </div>
-        <div style={{ background: '#131c31', border: '1px solid #24324d', borderRadius: 14, padding: 16 }}>
+        <div style={{ background: '#11192c', border: '1px solid #23314d', borderRadius: 14, padding: 16 }}>
           <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>Rata-Rata Tingkat Fokus</div>
           <div style={{ fontSize: '1.6rem', fontWeight: 800, marginTop: 4, color: '#3b82f6' }}>
             {summary.avg_focus_pct}%
           </div>
         </div>
-        <div style={{ background: '#131c31', border: '1px solid #24324d', borderRadius: 14, padding: 16 }}>
+        <div style={{ background: '#11192c', border: '1px solid #23314d', borderRadius: 14, padding: 16 }}>
           <div style={{ fontSize: '0.78rem', color: '#94a3b8' }}>Total Distraksi</div>
           <div style={{ fontSize: '1.6rem', fontWeight: 800, marginTop: 4, color: '#f59e0b' }}>
             {summary.total_distractions} kali
@@ -399,7 +773,7 @@ export default function DashboardPage() {
 
       {/* GRAFIK FOKUS 7 HARI TERAKHIR */}
       <section style={{
-        background: '#131c31', border: '1px solid #24324d', borderRadius: 16, padding: 18, marginBottom: 18
+        background: '#11192c', border: '1px solid #23314d', borderRadius: 16, padding: 18, marginBottom: 18
       }}>
         <h2 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: 14 }}>Grafik Menit Fokus (7 Hari Terakhir)</h2>
         {chart.length === 0 ? (
@@ -423,25 +797,36 @@ export default function DashboardPage() {
         )}
       </section>
 
-      {/* TABEL RIWAYAT SESI DATABASE */}
-      <section style={{ background: '#131c31', border: '1px solid #24324d', borderRadius: 16, padding: 18 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+      {/* TABEL RIWAYAT SESI DATABASE + EKSPOR CSV */}
+      <section style={{ background: '#11192c', border: '1px solid #23314d', borderRadius: 16, padding: 18 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 12 }}>
           <h2 style={{ fontSize: '1rem', fontWeight: 700 }}>Riwayat Sesi Belajar (Neon PostgreSQL)</h2>
-          <button
-            onClick={handleClearHistory}
-            style={{
-              background: 'rgba(239,68,68,0.15)', color: '#f87171', border: '1px solid #ef4444',
-              borderRadius: 8, padding: '6px 12px', fontSize: '0.78rem', fontWeight: 700, cursor: 'pointer'
-            }}
-          >
-            Hapus Semua
-          </button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              onClick={handleExportCsv}
+              style={{
+                background: 'rgba(16,185,129,0.16)', color: '#34d399', border: '1px solid #10b981',
+                borderRadius: 8, padding: '6px 12px', fontSize: '0.78rem', fontWeight: 700, cursor: 'pointer'
+              }}
+            >
+              Unduh CSV
+            </button>
+            <button
+              onClick={handleClearHistory}
+              style={{
+                background: 'rgba(239,68,68,0.15)', color: '#f87171', border: '1px solid #ef4444',
+                borderRadius: 8, padding: '6px 12px', fontSize: '0.78rem', fontWeight: 700, cursor: 'pointer'
+              }}
+            >
+              Hapus Semua
+            </button>
+          </div>
         </div>
 
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.84rem' }}>
             <thead>
-              <tr style={{ borderBottom: '1px solid #24324d', color: '#94a3b8', textAlign: 'left' }}>
+              <tr style={{ borderBottom: '1px solid #23314d', color: '#94a3b8', textAlign: 'left' }}>
                 <th style={{ padding: '10px 8px' }}>Waktu</th>
                 <th style={{ padding: '10px 8px' }}>Durasi / Target</th>
                 <th style={{ padding: '10px 8px' }}>Fokus Murni</th>
@@ -458,7 +843,7 @@ export default function DashboardPage() {
                 </tr>
               ) : (
                 sessions.map((s) => (
-                  <tr key={s.id} style={{ borderBottom: '1px solid #1e293b' }}>
+                  <tr key={s.id} style={{ borderBottom: '1px solid #17223b' }}>
                     <td style={{ padding: '10px 8px', color: '#cbd5e1' }}>{formatDateWIB(s.created_at)}</td>
                     <td style={{ padding: '10px 8px', fontWeight: 600 }}>
                       {formatDuration(s.elapsed_sec)} / {s.target_min}m
