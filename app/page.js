@@ -62,7 +62,6 @@ function RobotEyeAvatar({ expression }) {
         : 'none'
     }}>
       <svg width="112" height="44" viewBox="0 0 112 44" className={isAngry ? 'robot-eye-angry' : 'robot-eye-blink'}>
-        {/* Mata Kiri */}
         <g>
           <rect x="6" y="6" width="42" height="32" rx="13" fill={eyeColor} />
           {isHappy ? (
@@ -77,7 +76,6 @@ function RobotEyeAvatar({ expression }) {
           {isSuspicious && <rect x="4" y="4" width="46" height="11" fill="#070b14" />}
         </g>
 
-        {/* Mata Kanan */}
         <g>
           <rect x="64" y="6" width="42" height="32" rx="13" fill={eyeColor} />
           {isHappy ? (
@@ -104,15 +102,14 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [sendingCmd, setSendingCmd] = useState(false);
   const [syncingHardware, setSyncingHardware] = useState(false);
+  const [fastPolling, setFastPolling] = useState(false);
   const [pinging, setPinging] = useState(false);
   const [showCalib, setShowCalib] = useState(false);
   const [toast, setToast] = useState('');
 
-  // State PIN Lock
   const [pinInput, setPinInput] = useState('');
   const [pinError, setPinError] = useState('');
 
-  // Form Kalibrasi Jarak Jauh
   const [cfgForm, setCfgForm] = useState({
     minDist: 10,
     maxDist: 40,
@@ -125,10 +122,19 @@ export default function DashboardPage() {
   const cfgInitializedRef = useRef(false);
   const optimisticLockRef = useRef({ until: 0, patch: null });
   const pingWatchRef = useRef({ active: false, baselineUpdatedAt: null, deadline: 0 });
+  const fastPollTimeoutRef = useRef(null);
+
+  const triggerFastPollWindow = useCallback((durationMs = 12000) => {
+    setFastPolling(true);
+    if (fastPollTimeoutRef.current) clearTimeout(fastPollTimeoutRef.current);
+    fastPollTimeoutRef.current = setTimeout(() => {
+      setFastPolling(false);
+    }, durationMs);
+  }, []);
 
   const showToast = (msg) => {
     setToast(msg);
-    setTimeout(() => setToast(''), 2800);
+    setTimeout(() => setToast(''), 2600);
   };
 
   const fetchDashboard = useCallback(async () => {
@@ -142,7 +148,6 @@ export default function DashboardPage() {
           return;
         }
 
-        // Cek apakah ESP32 sudah membalas perintah PING
         const pw = pingWatchRef.current;
         if (pw.active && json.device) {
           if (json.device.updated_at && json.device.updated_at !== pw.baselineUpdatedAt) {
@@ -201,9 +206,10 @@ export default function DashboardPage() {
 
   useEffect(() => {
     fetchDashboard();
-    const timer = setInterval(fetchDashboard, pinging ? 1200 : 2500);
+    const intervalMs = (pinging || fastPolling) ? 900 : 2000;
+    const timer = setInterval(fetchDashboard, intervalMs);
     return () => clearInterval(timer);
-  }, [fetchDashboard, pinging]);
+  }, [fetchDashboard, pinging, fastPolling]);
 
   const handleUnlockPin = async (e) => {
     e.preventDefault();
@@ -268,6 +274,7 @@ export default function DashboardPage() {
   const sendControl = async (action, val = '') => {
     setSendingCmd(true);
     applyOptimisticChange(action, val);
+    triggerFastPollWindow(12000);
 
     try {
       const res = await fetch('/api/control', {
@@ -280,7 +287,7 @@ export default function DashboardPage() {
         if (action !== 'ping') {
           showToast('Perintah dikirim ke ESP32!');
         }
-        setTimeout(fetchDashboard, 1200);
+        setTimeout(fetchDashboard, 650);
       }
     } catch {
       optimisticLockRef.current = { until: 0, patch: null };
@@ -296,7 +303,7 @@ export default function DashboardPage() {
     pingWatchRef.current = {
       active: true,
       baselineUpdatedAt: data?.device?.updated_at || null,
-      deadline: Date.now() + 14000
+      deadline: Date.now() + 12000
     };
     await sendControl('ping');
   };
@@ -304,6 +311,7 @@ export default function DashboardPage() {
   const handleSaveRemoteConfig = async (e) => {
     e.preventDefault();
     setSendingCmd(true);
+    triggerFastPollWindow(12000);
     try {
       const res = await fetch('/api/control', {
         method: 'POST',
@@ -365,7 +373,6 @@ export default function DashboardPage() {
     );
   }
 
-  // Layar Kunci PIN jika DASHBOARD_PIN aktif
   if (data?.locked) {
     return (
       <main style={{ maxWidth: 380, margin: '90px auto', padding: 20 }}>
@@ -442,7 +449,6 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* HEADER DENGAN AVATAR MATA SVG & STATUS 3-KONDISI */}
       <header style={{
         display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center',
         gap: 14, marginBottom: 20, paddingBottom: 16, borderBottom: '1px solid #23314d'
@@ -506,7 +512,6 @@ export default function DashboardPage() {
         <RobotEyeAvatar expression={dev.expression} />
       </header>
 
-      {/* PANEL KALIBRASI SENSOR JARAK JAUH (COLLAPSIBLE) */}
       {showCalib && (
         <section style={{
           background: '#11192c', border: '1px solid #3b82f6', borderRadius: 16, padding: 18, marginBottom: 18
@@ -560,7 +565,6 @@ export default function DashboardPage() {
         </section>
       )}
 
-      {/* PANEL UTAMA: TIMER AMBIENT GLOW & TELEMETRI SENSOR */}
       <section style={{
         display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(310px, 1fr))',
         gap: 16, marginBottom: 18
@@ -668,7 +672,6 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* KOLOM KANAN: TARGET HARIAN & 4 SENSOR */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <div style={{
             background: '#11192c', border: '1px solid #23314d', borderRadius: 14, padding: 15,
@@ -742,7 +745,6 @@ export default function DashboardPage() {
         </div>
       </section>
 
-      {/* RINGKASAN STATISTIK NEON POSTGRESQL */}
       <section style={{
         display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
         gap: 12, marginBottom: 18
@@ -771,7 +773,6 @@ export default function DashboardPage() {
         </div>
       </section>
 
-      {/* GRAFIK FOKUS 7 HARI TERAKHIR */}
       <section style={{
         background: '#11192c', border: '1px solid #23314d', borderRadius: 16, padding: 18, marginBottom: 18
       }}>
@@ -797,7 +798,6 @@ export default function DashboardPage() {
         )}
       </section>
 
-      {/* TABEL RIWAYAT SESI DATABASE + EKSPOR CSV */}
       <section style={{ background: '#11192c', border: '1px solid #23314d', borderRadius: 16, padding: 18 }}>
         <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 12 }}>
           <h2 style={{ fontSize: '1rem', fontWeight: 700 }}>Riwayat Sesi Belajar (Neon PostgreSQL)</h2>

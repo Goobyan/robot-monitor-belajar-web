@@ -19,7 +19,6 @@ export async function POST(request) {
     const isSleeping = Boolean(body.sleeping);
     const isBootEvent = eventName === 'boot' || eventName === 'reconnect';
 
-    // 1. Perbarui status perangkat real-time + telemetri kesehatan + timestamp boot
     if (isBootEvent) {
       await sql`
         UPDATE device_state SET
@@ -73,7 +72,6 @@ export async function POST(request) {
       `;
     }
 
-    // 2. Simpan riwayat sesi baru dari antrean NVS ESP32
     let sessionSaved = false;
     if (body.newSession && Number(body.newSession.elapsedSec) >= 10) {
       const s = body.newSession;
@@ -95,7 +93,6 @@ export async function POST(request) {
       sessionSaved = true;
     }
 
-    // 3. Sinkronisasi dua arah konfigurasi kalibrasi sensor
     const cfgRows = await sql`SELECT * FROM device_config WHERE id = 1`;
     const dbCfg = cfgRows[0];
     const espCfgVer = Number(body.cfgVer || 1);
@@ -128,13 +125,14 @@ export async function POST(request) {
       }
     }
 
-    // 4. Pembersihan otomatis perintah lama (> 24 jam) agar tabel Neon tetap ramping
-    await sql`
-      DELETE FROM device_commands
-      WHERE executed = TRUE AND created_at < NOW() - INTERVAL '24 hours'
-    `;
+    // Pembersihan berkala (5% siklus) agar tidak menambah latency SQL di setiap POST
+    if (Math.random() < 0.05) {
+      await sql`
+        DELETE FROM device_commands
+        WHERE executed = TRUE AND created_at < NOW() - INTERVAL '24 hours'
+      `;
+    }
 
-    // 5. Ambil 1 perintah tertunda dari Website (termasuk perintah ping)
     const pending = await sql`
       SELECT id, action, val FROM device_commands
       WHERE executed = FALSE
